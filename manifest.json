@@ -1,0 +1,37 @@
+{
+  "manifest_version": 3,
+  "name": "Universal Web Agent",
+  "description": "A Chrome side-panel agent for reading, summarizing, and controlling the current web page with an OpenAI-compatible LLM.",
+  "version": "0.1.0",
+  "permissions": [
+    "activeTab",
+    "scripting",
+    "sidePanel",
+    "storage",
+    "tabs"
+  ],
+  "host_permissions": [
+    "<all_urls>"
+  ],
+  "action": {
+    "default_title": "Universal Web Agent"
+  },
+  "background": {
+    "service_worker": "src/background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": [
+        "<all_urls>"
+      ],
+      "js": [
+        "src/contentScript.js"
+      ],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "side_panel": {
+    "default_path": "src/panel.html"
+  }
+}

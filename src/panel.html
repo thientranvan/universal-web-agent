@@ -1,0 +1,90 @@
+<!doctype html>
+<html lang="vi">
+  <head>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <title>Universal Web Agent</title>
+    <link rel="stylesheet" href="panel.css">
+  </head>
+  <body>
+    <main class="app">
+      <header class="topbar">
+        <div>
+          <h1>Web Agent</h1>
+          <p id="tabLine">Tab hiện tại</p>
+        </div>
+        <button id="settingsToggle" class="icon-button" type="button" title="Cài đặt" aria-label="Cài đặt">
+          <span aria-hidden="true">⚙</span>
+        </button>
+      </header>
+
+      <section id="settingsPanel" class="settings" hidden>
+        <label>
+          <span>Base URL</span>
+          <input id="baseUrlInput" type="url" spellcheck="false" placeholder="https://api.openai.com/v1">
+        </label>
+        <label>
+          <span>API key</span>
+          <input id="apiKeyInput" type="password" spellcheck="false" autocomplete="off" placeholder="sk-...">
+        </label>
+        <label>
+          <span>Model</span>
+          <input id="modelInput" type="text" spellcheck="false" placeholder="gpt-4o-mini">
+        </label>
+        <div class="settings-grid">
+          <label>
+            <span>Temperature</span>
+            <input id="temperatureInput" type="number" min="0" max="2" step="0.1">
+          </label>
+          <label>
+            <span>Max steps</span>
+            <input id="maxStepsInput" type="number" min="1" max="20" step="1">
+          </label>
+        </div>
+        <label class="check-row">
+          <input id="visionInput" type="checkbox">
+          <span>Gửi ảnh chụp màn hình cho model vision</span>
+        </label>
+        <label class="check-row">
+          <input id="pageControlInput" type="checkbox">
+          <span>Cho phép click, điền form, sửa DOM</span>
+        </label>
+        <label class="check-row">
+          <input id="scriptInput" type="checkbox">
+          <span>Cho phép AI chạy JavaScript trên trang</span>
+        </label>
+        <label class="check-row">
+          <input id="networkInput" type="checkbox">
+          <span>Cho phép gửi HTTP request</span>
+        </label>
+        <div class="settings-actions">
+          <button id="saveSettingsButton" type="button">Lưu</button>
+          <span id="settingsStatus" role="status"></span>
+        </div>
+      </section>
+
+      <section class="conversation-bar">
+        <div class="domain-line">
+          <span>Nhóm domain</span>
+          <strong id="hostLine">Đang tải...</strong>
+        </div>
+        <div class="thread-row">
+          <select id="threadSelect" aria-label="Chọn hội thoại"></select>
+          <button id="newThreadButton" class="icon-button" type="button" title="Tạo hội thoại mới" aria-label="Tạo hội thoại mới">+</button>
+          <button id="resetThreadButton" class="ghost small-button" type="button">Reset</button>
+        </div>
+      </section>
+
+      <section id="messages" class="messages" aria-live="polite"></section>
+
+      <form id="composer" class="composer">
+        <div class="composer-box">
+          <textarea id="promptInput" rows="1" placeholder="Nhập lệnh cho tab hiện tại..."></textarea>
+          <button id="sendButton" class="send-button" type="submit">Gửi</button>
+        </div>
+      </form>
+    </main>
+
+    <script src="panel.js"></script>
+  </body>
+</html>
