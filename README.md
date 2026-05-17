@@ -29,6 +29,7 @@ Trong side panel, mở nút cài đặt và nhập:
 - Click, điền input/textarea/select, tick checkbox/radio.
 - Chỉnh DOM runtime bằng `text`, `html`, `value`, `style`, hoặc `attribute`.
 - Chạy JavaScript tùy ý trong tab hiện tại qua tool `page_run_script` khi bật quyền trong cài đặt.
+- Bật autopilot để theo dõi tab định kỳ và tiếp tục thao tác/gửi tin khi người dùng đã ra lệnh rõ.
 - Chụp màn hình vùng tab đang nhìn thấy và gửi cho model vision.
 - Gửi HTTP request từ background script nếu bật quyền trong cài đặt.
 

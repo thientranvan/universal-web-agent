@@ -11,6 +11,7 @@ const elements = {
   visionInput: document.querySelector("#visionInput"),
   pageControlInput: document.querySelector("#pageControlInput"),
   scriptInput: document.querySelector("#scriptInput"),
+  autopilotInput: document.querySelector("#autopilotInput"),
   networkInput: document.querySelector("#networkInput"),
   saveSettingsButton: document.querySelector("#saveSettingsButton"),
   settingsStatus: document.querySelector("#settingsStatus"),
@@ -87,7 +88,7 @@ function bindEvents() {
   });
 
   elements.promptInput.addEventListener("keydown", async (event) => {
-    if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+    if (event.key === "Enter" && !event.shiftKey && !event.isComposing) {
       event.preventDefault();
       await sendPrompt();
     }
@@ -149,6 +150,7 @@ async function loadSettings() {
   elements.visionInput.checked = Boolean(settings.enableVision);
   elements.pageControlInput.checked = Boolean(settings.allowPageControl);
   elements.scriptInput.checked = Boolean(settings.allowScriptExecution);
+  elements.autopilotInput.checked = Boolean(settings.allowAutopilot);
   elements.networkInput.checked = Boolean(settings.allowNetwork);
 }
 
@@ -165,6 +167,7 @@ async function saveSettings() {
     enableVision: elements.visionInput.checked,
     allowPageControl: elements.pageControlInput.checked,
     allowScriptExecution: elements.scriptInput.checked,
+    allowAutopilot: elements.autopilotInput.checked,
     allowNetwork: elements.networkInput.checked
   };
 

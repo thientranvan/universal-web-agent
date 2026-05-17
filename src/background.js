@@ -7,8 +7,12 @@ const DEFAULT_SETTINGS = {
   enableVision: true,
   allowPageControl: true,
   allowScriptExecution: true,
+  allowAutopilot: true,
   allowNetwork: true
 };
+
+const AUTOPILOT_STORAGE_KEY = "webAgentAutopilotTasksV1";
+const runningAutopilotTasks = new Set();
 
 const TOOL_DEFINITIONS = [
   {
@@ -304,6 +308,51 @@ const TOOL_DEFINITIONS = [
         required: ["url"]
       }
     }
+  },
+  {
+    type: "function",
+    function: {
+      name: "agent_autopilot_start",
+      description: "Start a periodic autonomous task for the current tab. Use only when the user explicitly asks the agent to keep watching and continue acting, such as checking a chat every N seconds and replying.",
+      parameters: {
+        type: "object",
+        properties: {
+          instruction: {
+            type: "string",
+            description: "The user's autonomous task instruction, including style, goals, boundaries, and when to stop."
+          },
+          intervalSeconds: {
+            type: "integer",
+            default: 10,
+            description: "How often to check the current tab."
+          },
+          maxTurns: {
+            type: "integer",
+            default: 30,
+            description: "Maximum autonomous checks before stopping."
+          }
+        },
+        required: ["instruction"]
+      }
+    }
+  },
+  {
+    type: "function",
+    function: {
+      name: "agent_autopilot_stop",
+      description: "Stop autonomous periodic tasks for this tab, or a specific task id.",
+      parameters: {
+        type: "object",
+        properties: {
+          taskId: {
+            type: "string"
+          },
+          reason: {
+            type: "string"
+          }
+        }
+      }
+    }
   }
 ];
 
@@ -327,6 +376,16 @@ chrome.action.onClicked.addListener((tab) => {
   }
 });
 
+chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
+  if (changeInfo.status === "complete") {
+    restartAutopilotsForTab(tabId).catch(() => {});
+  }
+});
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  stopAutopilotsForRemovedTab(tabId).catch(() => {});
+});
+
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.target !== "chrome-agent-background") {
     return false;
@@ -343,6 +402,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       case "runAgent":
         sendResponse(await runAgent(message));
+        break;
+      case "autopilotTick":
+        sendResponse(await handleAutopilotTick(message.taskId, sender.tab?.id));
         break;
       default:
         sendResponse({ ok: false, error: `Unknown message type: ${message.type}` });
@@ -423,9 +485,12 @@ async function runAgent(message) {
 
   const toolLog = [];
   const maxSteps = clamp(Number(settings.maxSteps) || DEFAULT_SETTINGS.maxSteps, 1, 20);
+  const tools = message.disableAutopilotTools
+    ? TOOL_DEFINITIONS.filter((tool) => !tool.function?.name?.startsWith("agent_autopilot_"))
+    : TOOL_DEFINITIONS;
 
   for (let step = 0; step < maxSteps; step += 1) {
-    const assistantMessage = await callChatCompletion(settings, messages, TOOL_DEFINITIONS);
+    const assistantMessage = await callChatCompletion(settings, messages, tools);
     const toolCalls = assistantMessage.tool_calls || [];
 
     if (!toolCalls.length) {
@@ -512,19 +577,23 @@ async function runAgent(message) {
 function buildSystemPrompt(settings) {
   return [
     "You are Universal Web Agent, a Chrome extension agent running in the user's current tab.",
-    "You are a general-purpose browser assistant for extraction, analysis, page automation, debugging, data cleanup, DOM editing, navigation, and workflow help. Do not frame yourself as only a homework helper.",
-    "You can inspect page text, links, images, forms, visible screenshots, send HTTP requests, mutate the live DOM, and run page JavaScript through tools.",
-    "Use tools whenever the user's request depends on the current page. Do not guess page content.",
-    "For page changes, prefer precise selectors from page_read/page_query before clicking or filling.",
-    "When dedicated tools are insufficient, write a small page_run_script script. Prefer scripts that return concise serializable results. Avoid infinite loops and excessive page-wide mutation.",
+    "Operate in execution-first mode. You are not a passive advisor. For any request involving the current web page, inspect the page, run tools, execute actions, observe results, and continue until the task is done or a real blocker is found.",
+    "You are a general-purpose browser automation agent for extraction, analysis, page control, messaging workflows, debugging, data cleanup, DOM editing, navigation, and repetitive web work. Do not frame yourself as only a homework helper.",
+    "You can inspect page text, links, images, forms, visible screenshots, send HTTP requests, mutate the live DOM, and run JavaScript in the page through tools.",
+    "Default page strategy: use page_run_script first for non-trivial web tasks. Write a compact JavaScript script, execute it, return concise serializable results, then decide the next action from those results. Do not merely print a script for the user when you can run it.",
+    "If a script fails, use the error/result to revise and run another script. Use page_read/page_query/click/fill/check/select when they are more reliable or when script execution is disabled.",
+    "For DOM/form/chat automation, scripts should query relevant elements, read visible state, perform clicks/fills with proper input/change events, and return a summary of what happened. Avoid infinite loops, huge result payloads, and broad destructive mutations.",
+    "Do not give generic refusal text for ordinary browser automation. If a request is allowed and tools are enabled, act. Ask follow-up questions only when the missing detail blocks execution.",
+    "If the user explicitly asks you to keep watching, auto-chat, auto-reply, check periodically, or continue a browser workflow without further approval, use agent_autopilot_start after doing any immediate first action.",
+    "For user-authorized messaging in web chat apps, fill and send messages on behalf of the user when they clearly ask you to. Do not require per-message approval after the user explicitly asks for autonomous chat. Keep messages within the user's stated goal and style. Do not spam, threaten, harass, deceive about material facts, or continue if the recipient declines or asks to stop.",
     "Live DOM edits are temporary and may be overwritten by the website.",
-    "Do not submit payments, credentials, irreversible account changes, or destructive actions unless the user explicitly confirms the exact action.",
-    "For quiz-like pages, do not give a blanket refusal. Inspect the page, read every question and option, solve step by step internally, then provide a concise answer list with brief reasoning.",
-    "If the user asks you to tick or fill answers on a practice/homework quiz, select the answers with page tools. Do not click final Submit/Finish/Turn in buttons unless the user explicitly confirms that exact action.",
-    "If the page clearly looks like a graded, timed, proctored, certification, admissions, hiring, or live exam, explain that you can tutor, explain, or check the user's chosen answers, and ask for confirmation that automation is permitted before selecting answers.",
+    "Hard stops: do not submit payments, credentials, irreversible account changes, destructive deletes, malware, credential theft, evasion, or illegal actions unless the user explicitly confirms the exact legitimate action and it is safe to perform. If a hard stop applies, state the blocker briefly and offer the nearest safe automation.",
+    "For quiz-like pages, do not ask permission just because the page is timed, graded, or exam-like. When the user says to read questions and choose/check/fill answers, inspect every question and option, solve internally, select the best answers with page tools, and report what you selected.",
+    "Only ask before clicking a final Submit/Finish/Turn in button if the user's request did not explicitly include submitting. If the user explicitly says to submit/nộp, do it after checking required fields.",
     "If the user writes Vietnamese, answer in Vietnamese. Keep final answers concise and actionable.",
     `Page control is ${settings.allowPageControl ? "enabled" : "disabled"}.`,
     `Arbitrary page script execution is ${settings.allowScriptExecution ? "enabled" : "disabled"}.`,
+    `Autopilot periodic automation is ${settings.allowAutopilot ? "enabled" : "disabled"}.`,
     `HTTP request tool is ${settings.allowNetwork ? "enabled" : "disabled"}.`
   ].join("\n");
 }
@@ -597,6 +666,10 @@ async function executeTool(name, args, context) {
     return { ok: false, error: "Page script execution is disabled in settings." };
   }
 
+  if ((name === "agent_autopilot_start" || name === "agent_autopilot_stop") && !context.settings.allowAutopilot) {
+    return { ok: false, error: "Autopilot is disabled in settings." };
+  }
+
   if (name === "http_request" && !context.settings.allowNetwork) {
     return { ok: false, error: "HTTP request tool is disabled in settings." };
   }
@@ -626,6 +699,10 @@ async function executeTool(name, args, context) {
       return captureVisibleScreenshot();
     case "http_request":
       return performHttpRequest(args);
+    case "agent_autopilot_start":
+      return startAutopilot(context.tabId, args);
+    case "agent_autopilot_stop":
+      return stopAutopilot(context.tabId, args);
     default:
       return { ok: false, error: `Unknown tool: ${name}` };
   }
@@ -767,6 +844,197 @@ async function runPageScript(tabId, args) {
   }
 }
 
+async function startAutopilot(tabId, args) {
+  const instruction = String(args?.instruction || "").trim();
+
+  if (!instruction) {
+    return { ok: false, error: "Missing autopilot instruction." };
+  }
+
+  const intervalSeconds = clamp(Number(args?.intervalSeconds) || 10, 5, 3600);
+  const maxTurns = clamp(Number(args?.maxTurns) || 30, 1, 500);
+  const taskId = `autopilot-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const tasks = await getAutopilotTasks();
+
+  tasks[taskId] = {
+    id: taskId,
+    tabId,
+    instruction,
+    intervalMs: intervalSeconds * 1000,
+    maxTurns,
+    turns: 0,
+    enabled: true,
+    history: [],
+    startedAt: Date.now(),
+    updatedAt: Date.now()
+  };
+
+  await saveAutopilotTasks(tasks);
+  const startResult = await sendToContent(tabId, {
+    type: "autopilot_start",
+    args: {
+      taskId,
+      intervalMs: intervalSeconds * 1000
+    }
+  });
+
+  if (startResult.ok === false) {
+    tasks[taskId].enabled = false;
+    await saveAutopilotTasks(tasks);
+    return startResult;
+  }
+
+  return {
+    ok: true,
+    taskId,
+    action: `started autopilot every ${intervalSeconds}s for up to ${maxTurns} checks`
+  };
+}
+
+async function stopAutopilot(tabId, args = {}) {
+  const tasks = await getAutopilotTasks();
+  const taskIds = args.taskId
+    ? [args.taskId]
+    : Object.values(tasks)
+      .filter((task) => task.tabId === tabId && task.enabled)
+      .map((task) => task.id);
+
+  for (const taskId of taskIds) {
+    if (tasks[taskId]) {
+      tasks[taskId].enabled = false;
+      tasks[taskId].stopReason = args.reason || "stopped";
+      tasks[taskId].updatedAt = Date.now();
+      runningAutopilotTasks.delete(taskId);
+    }
+
+    await sendToContent(tabId, {
+      type: "autopilot_stop",
+      args: { taskId }
+    }).catch(() => {});
+  }
+
+  await saveAutopilotTasks(tasks);
+
+  return {
+    ok: true,
+    action: `stopped ${taskIds.length} autopilot task(s)`
+  };
+}
+
+async function handleAutopilotTick(taskId, senderTabId) {
+  if (!taskId || runningAutopilotTasks.has(taskId)) {
+    return { ok: true, skipped: true };
+  }
+
+  const tasks = await getAutopilotTasks();
+  const task = tasks[taskId];
+
+  if (!task || !task.enabled) {
+    return { ok: true, skipped: true };
+  }
+
+  if (senderTabId && task.tabId !== senderTabId) {
+    task.tabId = senderTabId;
+  }
+
+  if (task.turns >= task.maxTurns) {
+    task.enabled = false;
+    task.stopReason = "maxTurns reached";
+    task.updatedAt = Date.now();
+    await saveAutopilotTasks(tasks);
+    await sendToContent(task.tabId, {
+      type: "autopilot_stop",
+      args: { taskId }
+    }).catch(() => {});
+    return { ok: true, stopped: true };
+  }
+
+  runningAutopilotTasks.add(taskId);
+
+  try {
+    const prompt = [
+      "AUTOPILOT PERIODIC CHECK",
+      `User instruction: ${task.instruction}`,
+      `Check number: ${task.turns + 1} of ${task.maxTurns}.`,
+      "Inspect the current tab before acting. If this is a chat, identify whether there is a new incoming message or a clear next conversational step.",
+      "If action is needed, perform it with the available page tools. If sending a chat message, keep it natural, concise, and aligned with the user's style and goal.",
+      "Do not send duplicate messages. Do not continue if the other person declines, asks to stop, or the conversation becomes inappropriate for the user's stated goal.",
+      "If no action is needed yet, do not send anything; just return a short status."
+    ].join("\n");
+
+    const result = await runAgent({
+      tabId: task.tabId,
+      prompt,
+      history: task.history || [],
+      disableAutopilotTools: true
+    });
+
+    task.turns += 1;
+    task.updatedAt = Date.now();
+    task.history = [
+      ...(task.history || []),
+      { role: "user", content: prompt },
+      { role: "assistant", content: result.ok ? result.answer : result.error }
+    ].slice(-10);
+    tasks[taskId] = task;
+    await saveAutopilotTasks(tasks);
+
+    return {
+      ok: true,
+      answer: result.ok ? result.answer : result.error,
+      turns: task.turns
+    };
+  } finally {
+    runningAutopilotTasks.delete(taskId);
+  }
+}
+
+async function restartAutopilotsForTab(tabId) {
+  const tasks = await getAutopilotTasks();
+
+  for (const task of Object.values(tasks)) {
+    if (task.tabId === tabId && task.enabled) {
+      await sendToContent(tabId, {
+        type: "autopilot_start",
+        args: {
+          taskId: task.id,
+          intervalMs: task.intervalMs
+        }
+      }).catch(() => {});
+    }
+  }
+}
+
+async function stopAutopilotsForRemovedTab(tabId) {
+  const tasks = await getAutopilotTasks();
+  let changed = false;
+
+  for (const task of Object.values(tasks)) {
+    if (task.tabId === tabId && task.enabled) {
+      task.enabled = false;
+      task.stopReason = "tab removed";
+      task.updatedAt = Date.now();
+      runningAutopilotTasks.delete(task.id);
+      changed = true;
+    }
+  }
+
+  if (changed) {
+    await saveAutopilotTasks(tasks);
+  }
+}
+
+async function getAutopilotTasks() {
+  const stored = await chrome.storage.local.get(AUTOPILOT_STORAGE_KEY);
+  return stored[AUTOPILOT_STORAGE_KEY] || {};
+}
+
+async function saveAutopilotTasks(tasks) {
+  await chrome.storage.local.set({
+    [AUTOPILOT_STORAGE_KEY]: tasks
+  });
+}
+
 async function sendToContent(tabId, payload) {
   const message = {
     target: "chrome-agent-content",
@@ -870,6 +1138,10 @@ function summarizeToolResult(result) {
 
   if (result.action) {
     return result.action;
+  }
+
+  if (result.taskId) {
+    return `task ${result.taskId}`;
   }
 
   if (Array.isArray(result.images)) {

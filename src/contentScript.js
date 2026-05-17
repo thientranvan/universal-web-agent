@@ -4,6 +4,7 @@
   }
 
   window.__UNIVERSAL_WEB_AGENT_CONTENT__ = true;
+  const autopilotIntervals = new Map();
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || message.target !== "chrome-agent-content") {
@@ -46,9 +47,71 @@
         return selectOption(args);
       case "page_dom_set":
         return setDomValue(args);
+      case "autopilot_start":
+        return startAutopilotTimer(args);
+      case "autopilot_stop":
+        return stopAutopilotTimer(args);
       default:
         return { ok: false, error: `Unknown content command: ${message.type}` };
     }
+  }
+
+  function startAutopilotTimer(args) {
+    const taskId = String(args.taskId || "");
+
+    if (!taskId) {
+      return { ok: false, error: "Missing autopilot taskId." };
+    }
+
+    const intervalMs = clamp(Number(args.intervalMs) || 10000, 5000, 3600000);
+    stopAutopilotTimer({ taskId });
+
+    const timer = setInterval(() => {
+      chrome.runtime.sendMessage({
+        target: "chrome-agent-background",
+        type: "autopilotTick",
+        taskId
+      }).catch(() => {});
+    }, intervalMs);
+
+    autopilotIntervals.set(taskId, timer);
+
+    return {
+      ok: true,
+      action: `content autopilot timer started every ${Math.round(intervalMs / 1000)}s`,
+      taskId
+    };
+  }
+
+  function stopAutopilotTimer(args) {
+    const taskId = args?.taskId ? String(args.taskId) : "";
+
+    if (taskId) {
+      const timer = autopilotIntervals.get(taskId);
+
+      if (timer) {
+        clearInterval(timer);
+        autopilotIntervals.delete(taskId);
+      }
+
+      return {
+        ok: true,
+        action: `content autopilot timer stopped`,
+        taskId
+      };
+    }
+
+    for (const timer of autopilotIntervals.values()) {
+      clearInterval(timer);
+    }
+
+    const count = autopilotIntervals.size;
+    autopilotIntervals.clear();
+
+    return {
+      ok: true,
+      action: `stopped ${count} content autopilot timer(s)`
+    };
   }
 
   function readPage(args) {
