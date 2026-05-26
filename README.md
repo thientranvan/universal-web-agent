@@ -30,7 +30,7 @@ Trong side panel, mở nút cài đặt và nhập:
 - Chỉnh DOM runtime bằng `text`, `html`, `value`, `style`, hoặc `attribute`.
 - Chạy JavaScript tùy ý trong tab hiện tại qua tool `page_run_script` khi bật quyền trong cài đặt.
 - Bật autopilot để theo dõi tab định kỳ và tiếp tục thao tác/gửi tin khi người dùng đã ra lệnh rõ.
-- Menu nổi trên trang khi side panel đang mở: `Shift+1` chạy patch outfocus, `Shift+2` gửi nhanh prompt làm bài.
+- Menu nổi trên trang khi side panel đang mở hoặc khi bấm `Ctrl`: `Shift+1` chạy patch outfocus, `Shift+2` gửi nhanh prompt làm bài.
 - Chụp màn hình vùng tab đang nhìn thấy và gửi cho model vision.
 - Gửi HTTP request từ background script nếu bật quyền trong cài đặt.
 

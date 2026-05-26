@@ -6,8 +6,10 @@
   window.__UNIVERSAL_WEB_AGENT_CONTENT__ = true;
   const autopilotIntervals = new Map();
   let overlayHost = null;
-  let overlayVisible = false;
+  let panelOverlayVisible = false;
+  let manualOverlayVisible = false;
   let overlayStatusTimer = null;
+  let ctrlSoloCandidate = false;
 
   setupOverlayMenu();
 
@@ -64,7 +66,8 @@
   }
 
   function setupOverlayMenu() {
-    window.addEventListener("keydown", handleOverlayShortcut, true);
+    window.addEventListener("keydown", handleOverlayKeydown, true);
+    window.addEventListener("keyup", handleOverlayKeyup, true);
     document.addEventListener("fullscreenchange", mountOverlay, true);
     ensureOverlay();
     setOverlayVisible(false);
@@ -184,10 +187,8 @@
   }
 
   function setOverlayVisible(visible) {
-    overlayVisible = visible;
-    ensureOverlay();
-    mountOverlay();
-    overlayHost.style.display = visible ? "block" : "none";
+    panelOverlayVisible = visible;
+    renderOverlayVisibility();
 
     return {
       ok: true,
@@ -195,8 +196,39 @@
     };
   }
 
-  function handleOverlayShortcut(event) {
-    if (!overlayVisible || event.repeat || !event.shiftKey) {
+  function toggleManualOverlayVisible() {
+    manualOverlayVisible = !manualOverlayVisible;
+    renderOverlayVisibility();
+
+    if (manualOverlayVisible) {
+      overlayHost.__setStatus("Menu on");
+    }
+  }
+
+  function showManualOverlayVisible() {
+    manualOverlayVisible = true;
+    renderOverlayVisibility();
+  }
+
+  function renderOverlayVisibility() {
+    ensureOverlay();
+    mountOverlay();
+    overlayHost.style.display = panelOverlayVisible || manualOverlayVisible ? "block" : "none";
+  }
+
+  function handleOverlayKeydown(event) {
+    if (event.key === "Control") {
+      if (!event.repeat) {
+        ctrlSoloCandidate = true;
+      }
+      return;
+    }
+
+    if (event.ctrlKey) {
+      ctrlSoloCandidate = false;
+    }
+
+    if (event.repeat || !event.shiftKey) {
       return;
     }
 
@@ -210,12 +242,28 @@
     event.preventDefault();
     event.stopImmediatePropagation();
     event.stopPropagation();
+    showManualOverlayVisible();
 
     if (isFirst) {
       runOutfocusPatchFromOverlay();
     } else {
       runQuickPromptFromOverlay();
     }
+  }
+
+  function handleOverlayKeyup(event) {
+    if (event.key !== "Control") {
+      return;
+    }
+
+    if (ctrlSoloCandidate) {
+      event.preventDefault();
+      event.stopImmediatePropagation();
+      event.stopPropagation();
+      toggleManualOverlayVisible();
+    }
+
+    ctrlSoloCandidate = false;
   }
 
   async function runOutfocusPatchFromOverlay(button = null) {
