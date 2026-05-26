@@ -5,6 +5,11 @@
 
   window.__UNIVERSAL_WEB_AGENT_CONTENT__ = true;
   const autopilotIntervals = new Map();
+  let overlayHost = null;
+  let overlayVisible = false;
+  let overlayStatusTimer = null;
+
+  setupOverlayMenu();
 
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     if (!message || message.target !== "chrome-agent-content") {
@@ -51,8 +56,216 @@
         return startAutopilotTimer(args);
       case "autopilot_stop":
         return stopAutopilotTimer(args);
+      case "overlay_set_visible":
+        return setOverlayVisible(Boolean(args.visible));
       default:
         return { ok: false, error: `Unknown content command: ${message.type}` };
+    }
+  }
+
+  function setupOverlayMenu() {
+    window.addEventListener("keydown", handleOverlayShortcut, true);
+    document.addEventListener("fullscreenchange", mountOverlay, true);
+    ensureOverlay();
+    setOverlayVisible(false);
+  }
+
+  function ensureOverlay() {
+    if (overlayHost) {
+      return overlayHost;
+    }
+
+    overlayHost = document.createElement("div");
+    overlayHost.id = "uwa-page-menu-host";
+    overlayHost.style.position = "fixed";
+    overlayHost.style.top = "10px";
+    overlayHost.style.right = "10px";
+    overlayHost.style.zIndex = "2147483647";
+    overlayHost.style.display = "none";
+    overlayHost.style.pointerEvents = "auto";
+    overlayHost.style.contain = "layout style paint";
+
+    const shadow = overlayHost.attachShadow({ mode: "closed" });
+    const style = document.createElement("style");
+    style.textContent = `
+      :host { all: initial; }
+      .bar {
+        align-items: center;
+        background: rgba(12, 18, 28, 0.94);
+        border: 1px solid rgba(255, 255, 255, 0.16);
+        border-radius: 8px;
+        box-shadow: 0 8px 26px rgba(0, 0, 0, 0.28);
+        display: flex;
+        gap: 6px;
+        padding: 6px;
+        pointer-events: auto;
+        user-select: none;
+      }
+      button {
+        background: #ffffff;
+        border: 0;
+        border-radius: 6px;
+        color: #111827;
+        cursor: pointer;
+        font: 600 12px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        min-height: 30px;
+        padding: 6px 9px;
+        white-space: nowrap;
+      }
+      button:hover { background: #e8eef6; }
+      button:disabled {
+        cursor: wait;
+        opacity: 0.68;
+      }
+      .status {
+        color: #d1d5db;
+        font: 500 12px/1.2 system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+        max-width: 180px;
+        overflow: hidden;
+        text-overflow: ellipsis;
+        white-space: nowrap;
+      }
+    `;
+
+    const bar = document.createElement("div");
+    bar.className = "bar";
+
+    const disableCatchButton = document.createElement("button");
+    disableCatchButton.type = "button";
+    disableCatchButton.textContent = "Disable catch event";
+    disableCatchButton.title = "Shift+1";
+
+    const quickPromptButton = document.createElement("button");
+    quickPromptButton.type = "button";
+    quickPromptButton.textContent = "Auto answer";
+    quickPromptButton.title = "Shift+2";
+
+    const status = document.createElement("span");
+    status.className = "status";
+    status.textContent = "";
+
+    for (const button of [disableCatchButton, quickPromptButton]) {
+      button.addEventListener("mousedown", (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+      }, true);
+    }
+
+    disableCatchButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      runOutfocusPatchFromOverlay(disableCatchButton);
+    });
+
+    quickPromptButton.addEventListener("click", (event) => {
+      event.preventDefault();
+      event.stopPropagation();
+      runQuickPromptFromOverlay(quickPromptButton);
+    });
+
+    bar.append(disableCatchButton, quickPromptButton, status);
+    shadow.append(style, bar);
+    overlayHost.__setStatus = setOverlayStatus.bind(null, status);
+    mountOverlay();
+
+    return overlayHost;
+  }
+
+  function mountOverlay() {
+    if (!overlayHost) {
+      return;
+    }
+
+    const parent = document.fullscreenElement || document.body || document.documentElement;
+
+    if (parent && overlayHost.parentNode !== parent) {
+      parent.append(overlayHost);
+    }
+  }
+
+  function setOverlayVisible(visible) {
+    overlayVisible = visible;
+    ensureOverlay();
+    mountOverlay();
+    overlayHost.style.display = visible ? "block" : "none";
+
+    return {
+      ok: true,
+      action: visible ? "overlay menu shown" : "overlay menu hidden"
+    };
+  }
+
+  function handleOverlayShortcut(event) {
+    if (!overlayVisible || event.repeat || !event.shiftKey) {
+      return;
+    }
+
+    const isFirst = event.code === "Digit1" || event.key === "!";
+    const isSecond = event.code === "Digit2" || event.key === "@";
+
+    if (!isFirst && !isSecond) {
+      return;
+    }
+
+    event.preventDefault();
+    event.stopImmediatePropagation();
+    event.stopPropagation();
+
+    if (isFirst) {
+      runOutfocusPatchFromOverlay();
+    } else {
+      runQuickPromptFromOverlay();
+    }
+  }
+
+  async function runOutfocusPatchFromOverlay(button = null) {
+    await runOverlayAction(button, "Patching...", "runOutfocusPatch");
+  }
+
+  async function runQuickPromptFromOverlay(button = null) {
+    await runOverlayAction(button, "Running prompt...", "runQuickPrompt");
+  }
+
+  async function runOverlayAction(button, pendingText, type) {
+    ensureOverlay();
+    overlayHost.__setStatus(pendingText);
+
+    if (button) {
+      button.disabled = true;
+    }
+
+    try {
+      const response = await chrome.runtime.sendMessage({
+        target: "chrome-agent-background",
+        type
+      });
+
+      if (!response?.ok) {
+        overlayHost.__setStatus(response?.error || "Failed");
+        return;
+      }
+
+      overlayHost.__setStatus(response.action || "Done");
+    } catch (error) {
+      overlayHost.__setStatus(normalizeError(error));
+    } finally {
+      if (button) {
+        button.disabled = false;
+      }
+    }
+  }
+
+  function setOverlayStatus(statusNode, text) {
+    statusNode.textContent = text;
+
+    if (overlayStatusTimer) {
+      clearTimeout(overlayStatusTimer);
+    }
+
+    if (text && text !== "Running prompt..." && text !== "Patching...") {
+      overlayStatusTimer = setTimeout(() => {
+        statusNode.textContent = "";
+      }, 4500);
     }
   }
 

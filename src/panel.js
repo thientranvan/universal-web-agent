@@ -33,14 +33,23 @@ let currentHostKey = "";
 let currentHostLabel = "";
 let currentThreadId = "";
 let isRunning = false;
+let panelPort = null;
 
 init();
 
 async function init() {
+  connectPanelPort();
   bindEvents();
   await loadSettings();
   await loadConversationGroups();
   await refreshActiveTabContext({ forceRender: true });
+}
+
+function connectPanelPort() {
+  panelPort = chrome.runtime.connect({ name: "uwa-panel" });
+  window.addEventListener("pagehide", () => {
+    panelPort?.disconnect();
+  });
 }
 
 function bindEvents() {

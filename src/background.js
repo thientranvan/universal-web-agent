@@ -12,7 +12,10 @@ const DEFAULT_SETTINGS = {
 };
 
 const AUTOPILOT_STORAGE_KEY = "webAgentAutopilotTasksV1";
+const QUICK_QUIZ_PROMPT = "Đọc các câu hỏi, tick vào đáp án đúng và điền nội dung vào các câu trả lời nếu có";
 const runningAutopilotTasks = new Set();
+let panelConnectionCount = 0;
+let lastOverlayTabId = null;
 
 const TOOL_DEFINITIONS = [
   {
@@ -379,11 +382,33 @@ chrome.action.onClicked.addListener((tab) => {
 chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
   if (changeInfo.status === "complete") {
     restartAutopilotsForTab(tabId).catch(() => {});
+    syncOverlayForTab(tabId).catch(() => {});
   }
+});
+
+chrome.tabs.onActivated.addListener((activeInfo) => {
+  updateOverlayForActiveTab(activeInfo.tabId).catch(() => {});
 });
 
 chrome.tabs.onRemoved.addListener((tabId) => {
   stopAutopilotsForRemovedTab(tabId).catch(() => {});
+  if (lastOverlayTabId === tabId) {
+    lastOverlayTabId = null;
+  }
+});
+
+chrome.runtime.onConnect.addListener((port) => {
+  if (port.name !== "uwa-panel") {
+    return;
+  }
+
+  panelConnectionCount += 1;
+  updateOverlayForActiveTab().catch(() => {});
+
+  port.onDisconnect.addListener(() => {
+    panelConnectionCount = Math.max(0, panelConnectionCount - 1);
+    updateOverlayForActiveTab().catch(() => {});
+  });
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -405,6 +430,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         break;
       case "autopilotTick":
         sendResponse(await handleAutopilotTick(message.taskId, sender.tab?.id));
+        break;
+      case "runOutfocusPatch":
+        sendResponse(await executeOutfocusPatch(sender.tab?.id));
+        break;
+      case "runQuickPrompt":
+        sendResponse(await runQuickPrompt(sender.tab?.id));
         break;
       default:
         sendResponse({ ok: false, error: `Unknown message type: ${message.type}` });
@@ -1033,6 +1064,214 @@ async function saveAutopilotTasks(tasks) {
   await chrome.storage.local.set({
     [AUTOPILOT_STORAGE_KEY]: tasks
   });
+}
+
+async function runQuickPrompt(tabId) {
+  if (!tabId) {
+    return { ok: false, error: "Không tìm thấy tab để chạy quick prompt." };
+  }
+
+  const result = await runAgent({
+    tabId,
+    prompt: QUICK_QUIZ_PROMPT,
+    history: []
+  });
+
+  return {
+    ...result,
+    action: result.ok ? "quick prompt completed" : undefined
+  };
+}
+
+async function executeOutfocusPatch(tabId) {
+  if (!tabId) {
+    return { ok: false, error: "Không tìm thấy tab để chạy patch." };
+  }
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      world: "MAIN",
+      func: outfocusPatchScript
+    });
+
+    return {
+      ok: true,
+      action: "outfocus event catch disabled"
+    };
+  } catch (error) {
+    return {
+      ok: false,
+      error: `Không thể chạy patch trên tab này: ${normalizeError(error)}`
+    };
+  }
+}
+
+function outfocusPatchScript() {
+  (() => {
+    const blocked = new Set([
+      "blur",
+      "focusout",
+      "visibilitychange",
+      "webkitvisibilitychange",
+      "pagehide",
+      "freeze"
+    ]);
+
+    const proto = EventTarget.prototype;
+
+    if (!window.__uwa_outfocus_patch__) {
+      window.__uwa_outfocus_patch__ = {
+        add: proto.addEventListener,
+        remove: proto.removeEventListener
+      };
+    }
+
+    const origAdd = window.__uwa_outfocus_patch__.add;
+
+    proto.addEventListener = function(type, listener, options) {
+      if (blocked.has(String(type).toLowerCase())) {
+        console.log("[patch] blocked listener:", type, "on", this);
+        return;
+      }
+
+      return origAdd.call(this, type, listener, options);
+    };
+
+    for (const t of blocked) {
+      window.addEventListener(
+        t,
+        (e) => {
+          e.stopImmediatePropagation();
+          e.stopPropagation();
+        },
+        true
+      );
+
+      document.addEventListener(
+        t,
+        (e) => {
+          e.stopImmediatePropagation();
+          e.stopPropagation();
+        },
+        true
+      );
+    }
+
+    const defineGetter = (obj, prop, value) => {
+      try {
+        Object.defineProperty(obj, prop, {
+          get: () => value,
+          configurable: true
+        });
+      } catch (e) {}
+    };
+
+    defineGetter(Document.prototype, "hidden", false);
+    defineGetter(Document.prototype, "visibilityState", "visible");
+    defineGetter(Document.prototype, "webkitHidden", false);
+
+    try {
+      document.hasFocus = () => true;
+    } catch (e) {}
+
+    try {
+      Document.prototype.hasFocus = function() {
+        return true;
+      };
+    } catch (e) {}
+
+    for (const k of ["onblur", "onfocusout", "onvisibilitychange", "onpagehide"]) {
+      try {
+        window[k] = null;
+        document[k] = null;
+      } catch (e) {}
+    }
+
+    if (!HTMLMediaElement.prototype.__outfocus_pause_patched__) {
+      const originalPause = HTMLMediaElement.prototype.pause;
+
+      Object.defineProperty(HTMLMediaElement.prototype, "__outfocus_pause_patched__", {
+        value: true
+      });
+
+      HTMLMediaElement.prototype.pause = function(...args) {
+        const stack = new Error().stack || "";
+
+        if (/visibility|blur|focusout|hidden|pagehide|freeze/i.test(stack)) {
+          console.log("[patch] blocked media pause due to outfocus:", this);
+          return;
+        }
+
+        return originalPause.apply(this, args);
+      };
+    }
+
+    document.querySelectorAll("video").forEach((v) => {
+      if (v.paused) {
+        v.play().catch(() => {});
+      }
+    });
+
+    const FLAG = "__uwa_disable_out_focus_video_pause__";
+
+    if (!window[FLAG]) {
+      window[FLAG] = true;
+      const nativePlay = HTMLMediaElement.prototype.play;
+
+      const resume = () => {
+        for (const v of document.querySelectorAll("video")) {
+          if (v.paused && !v.ended && v.readyState > 1) {
+            try {
+              nativePlay.call(v).catch(() => {});
+            } catch (e) {}
+          }
+        }
+      };
+
+      setInterval(resume, 1000);
+    }
+
+    console.log("[patch] outfocus video pause disabled");
+  })();
+}
+
+async function updateOverlayForActiveTab(tabId = null) {
+  const activeTabId = tabId || await getActiveTabId();
+
+  if (lastOverlayTabId && lastOverlayTabId !== activeTabId) {
+    await setOverlayVisibility(lastOverlayTabId, false);
+  }
+
+  lastOverlayTabId = activeTabId;
+
+  if (activeTabId) {
+    await setOverlayVisibility(activeTabId, panelConnectionCount > 0);
+  }
+}
+
+async function syncOverlayForTab(tabId) {
+  const activeTabId = await getActiveTabId();
+
+  if (tabId === activeTabId) {
+    await setOverlayVisibility(tabId, panelConnectionCount > 0);
+  }
+}
+
+async function setOverlayVisibility(tabId, visible) {
+  if (!tabId) {
+    return;
+  }
+
+  await sendToContent(tabId, {
+    type: "overlay_set_visible",
+    args: { visible }
+  }).catch(() => {});
+}
+
+async function getActiveTabId() {
+  const tabs = await chrome.tabs.query({ active: true, lastFocusedWindow: true });
+  return tabs[0]?.id || null;
 }
 
 async function sendToContent(tabId, payload) {
